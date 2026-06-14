@@ -1,117 +1,69 @@
-use std::borrow::Borrow;
-use std::error::Error;
-use std::io;
-use std::io::BufRead;
-use std::iter;
+use std::{
+    borrow::Borrow,
+    error::Error,
+    io::{self, BufRead},
+    iter,
+};
 
-use clap::{Arg, ArgMatches, Command};
+use clap::Parser;
 use pe::AsciiSet;
 use percent_encoding as pe;
 
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-const AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
-
+mod cli;
 mod encode_sets;
 
-fn main() {
-    let matches = Command::new("urlencode")
-        .version(VERSION)
-        .author(AUTHORS)
-        .about(
-            "URL-encodes or -decodes the input. If INPUT is given, it encodes or \
-             decodes INPUT, otherwise it takes its input fromt stdin.",
-        )
-        .arg(
-            Arg::new("decode")
-                .short('d')
-                .long("decode")
-                .help("Decode the input, rather than encode."),
-        )
-        .arg(
-            Arg::new("strict-decode")
-                .short('s')
-                .long("strict-decode")
-                .help(
-                    "Decode the input non-lossily. If set, the program will fail if it \
-                     encounters a sequence that does not produce valid UTF-8.",
-                ),
-        )
-        .arg(
-            Arg::new("encode-set")
-                .short('e')
-                .long("encode-set")
-                .takes_value(true)
-                .possible_values(&[
-                    "control",
-                    "fragment",
-                    "query",
-                    "squery",
-                    "path",
-                    "userinfo",
-                    "component",
-                    "form",
-                ])
-                .default_value("component")
-                .help("The encode set to use when encoding.")
-                .long_help(
-                    "The encode set to use when encoding. See \
-                     https://url.spec.whatwg.org/ \
-                     for more details.",
-                ),
-        )
-        .arg(Arg::new("INPUT").help("The string to encode.").index(1))
-        .get_matches();
+use crate::cli::{Args, EncodeSet};
 
-    if let Err(e) = run(&matches) {
+fn main() {
+    let args = Args::parse();
+
+    if let Err(e) = run(args) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     }
 }
 
-fn run(arg_matches: &ArgMatches) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut stdout_handle = stdout.lock();
-    let mut stdin_handle = stdin.lock();
-    let encode_set = get_encode_set(arg_matches);
+fn run(args: Args) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut stdout_handle = io::stdout().lock();
+    let mut stdin_handle = io::stdin().lock();
 
-    if arg_matches.is_present("INPUT") {
-        let input = arg_matches.value_of("INPUT").unwrap();
-        return transform_line(input, &mut stdout_handle, encode_set, arg_matches);
+    let encode_set = get_encode_set(&args.encode_set);
+
+    if let Some(input) = &args.input {
+        return transform_line(input, &mut stdout_handle, encode_set, &args);
     }
 
     let mut buf = String::new();
 
     while stdin_handle.read_line(&mut buf)? > 0 {
-        transform_line(buf.trim_end(), &mut stdout_handle, encode_set, arg_matches)?;
+        transform_line(buf.trim_end(), &mut stdout_handle, encode_set, &args)?;
         buf.clear();
     }
 
     Ok(())
 }
 
-fn get_encode_set(args: &ArgMatches) -> &'static AsciiSet {
-    match args.value_of("encode-set").unwrap() {
-        "control" => encode_sets::CONTROLS,
-        "fragment" => encode_sets::FRAGMENT,
-        "query" => encode_sets::QUERY,
-        "squery" => encode_sets::SPECIAL_QUERY,
-        "path" => encode_sets::PATH,
-        "userinfo" => encode_sets::USERINFO,
-        "component" => encode_sets::COMPONENT,
-        "form" => encode_sets::FORM,
-        _ => panic!("Unknown encode set"),
+fn get_encode_set(encode_set: &EncodeSet) -> &'static AsciiSet {
+    match encode_set {
+        EncodeSet::Control => encode_sets::CONTROLS,
+        EncodeSet::Fragment => encode_sets::FRAGMENT,
+        EncodeSet::Query => encode_sets::QUERY,
+        EncodeSet::Squery => encode_sets::SPECIAL_QUERY,
+        EncodeSet::Path => encode_sets::PATH,
+        EncodeSet::Userinfo => encode_sets::USERINFO,
+        EncodeSet::Component => encode_sets::COMPONENT,
+        EncodeSet::Form => encode_sets::FORM,
     }
 }
 
-fn transform_line<W: io::Write>(
+fn transform_line(
     line: &str,
-    output: &mut W,
+    output: &mut impl io::Write,
     encode_set: &'static AsciiSet,
-    arg_matches: &ArgMatches,
+    args: &Args,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
-    let decode_mode = arg_matches.is_present("decode") || arg_matches.is_present("strict-decode");
-    let lossy = !arg_matches.is_present("strict-decode");
+    let decode_mode = args.decode || args.strict_decode;
+    let lossy = !args.strict_decode;
 
     if decode_mode {
         decode(line.as_bytes(), output, lossy)
@@ -121,9 +73,9 @@ fn transform_line<W: io::Write>(
     }
 }
 
-fn decode<W: io::Write>(
+fn decode(
     line: &[u8],
-    output: &mut W,
+    output: &mut impl io::Write,
     lossy: bool,
 ) -> Result<(), Box<dyn Error + Send + Sync>> {
     let decoder = pe::percent_decode(line);
@@ -142,10 +94,10 @@ fn decode<W: io::Write>(
     }
 }
 
-fn encode<W: io::Write>(
+fn encode(
     line: &str,
     encode_set: &'static AsciiSet,
-    output: &mut W,
+    output: &mut impl io::Write,
 ) -> io::Result<()> {
     let encoded = pe::utf8_percent_encode(line, encode_set);
     write_output(encoded, output)
